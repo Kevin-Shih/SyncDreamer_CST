@@ -16,6 +16,7 @@ open3d
 trimesh
 easydict
 nerfacc
+transforms3d
 imageio-ffmpeg==0.4.7
 git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
 git+https://github.com/openai/CLIP.git

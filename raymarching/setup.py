@@ -5,12 +5,15 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 _src_path = os.path.dirname(os.path.abspath(__file__))
 
 nvcc_flags = [
-    '-O3', '-std=c++14',
-    '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__',
+    '-O3',
+    '-std=c++17',
+    '-U__CUDA_NO_HALF_OPERATORS__',
+    '-U__CUDA_NO_HALF_CONVERSIONS__',
+    '-U__CUDA_NO_HALF2_OPERATORS__',
 ]
 
 if os.name == "posix":
-    c_flags = ['-O3', '-std=c++14']
+    c_flags = ['-O3', '-std=c++17']
 elif os.name == "nt":
     c_flags = ['/O2', '/std:c++17']
 
@@ -18,7 +21,13 @@ elif os.name == "nt":
     def find_cl_path():
         import glob
         for edition in ["Enterprise", "Professional", "BuildTools", "Community"]:
-            paths = sorted(glob.glob(r"C:\\Program Files (x86)\\Microsoft Visual Studio\\*\\%s\\VC\\Tools\\MSVC\\*\\bin\\Hostx64\\x64" % edition), reverse=True)
+            paths = sorted(
+                glob.glob(
+                    r"C:\\Program Files (x86)\\Microsoft Visual Studio\\*\\%s\\VC\\Tools\\MSVC\\*\\bin\\Hostx64\\x64" %
+                    edition
+                ),
+                reverse=True
+            )
             if paths:
                 return paths[0]
 
@@ -28,7 +37,6 @@ elif os.name == "nt":
         if cl_path is None:
             raise RuntimeError("Could not locate a supported Microsoft Visual C++ installation")
         os.environ["PATH"] += ";" + cl_path
-
 '''
 Usage:
 
@@ -42,14 +50,13 @@ pip install -e . # ditto but better (e.g., dependency & metadata handling)
 
 '''
 setup(
-    name='raymarching', # package name, import this to use python API
+    name='raymarching',                                           # package name, import this to use python API
     ext_modules=[
         CUDAExtension(
-            name='_raymarching', # extension name, import this to use CUDA API
+            name='_raymarching',                                  # extension name, import this to use CUDA API
             sources=[os.path.join(_src_path, 'src', f) for f in [
                 'raymarching.cu',
-                'bindings.cpp',
-            ]],
+                'bindings.cpp',]],
             extra_compile_args={
                 'cxx': c_flags,
                 'nvcc': nvcc_flags,

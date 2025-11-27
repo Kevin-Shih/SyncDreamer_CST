@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytorch_lightning as pl
+import itertools
 import torch
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -15,6 +17,12 @@ from ldm.models.diffusion.sync_dreamer_network import NoisyTargetViewEncoder, Sp
 from ldm.modules.diffusionmodules.util import make_ddim_timesteps, timestep_embedding
 from ldm.modules.encoders.modules import FrozenCLIPImageEmbedder
 from ldm.util import instantiate_from_config
+from ldm.lora import (
+    inject_trainable_lora_extended,
+    inject_trainable_lora_extended3d,
+    monkeypatch_remove_lora,
+    save_lora_weight,
+)
 
 
 def disabled_train(self, mode=True):
@@ -308,10 +316,7 @@ class SyncMultiviewDiffusion(pl.LightningModule):
             disable_training_module(self.cc_projection)
 
     def _init_multiview(self):
-        K, azs, _, _, poses = read_pickle(f'meta_info/camera-16.pkl')
-        # K = K[::2]
-        # azs = azs[::2]
-        # poses = poses[::2]
+        K, azs, _, _, poses = read_pickle(f'meta_info/camera-{self.view_num}.pkl')
         default_image_size = 256
         ratio = self.image_size / default_image_size
         K = np.diag([ratio, ratio, 1]) @ K
@@ -430,12 +435,16 @@ class SyncMultiviewDiffusion(pl.LightningModule):
             x = None
 
         image_input = batch['input_image'].permute(0, 3, 1, 2)
+        # print(batch['input_elevation'].shape)
         elevation_input = batch['input_elevation'][:, 0] # b
         x_input = self.encode_first_stage(image_input)
         input_info = {'image': image_input, 'elevation': elevation_input, 'x': x_input}
+
+        addtional_input_image = batch['addtional_input_image'].permute(0, 3, 1, 2)
         with torch.no_grad():
             clip_embed = self.clip_image_encoder.encode(image_input)
-        return x, clip_embed, input_info
+            additional_clip_embed = self.clip_image_encoder.encode(addtional_input_image)
+        return x, clip_embed, input_info, additional_clip_embed
 
     def embed_time(self, t):
         t_embed = timestep_embedding(t, self.time_embed_dim, repeat_only=False) # B,TED
@@ -467,11 +476,11 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         x_concat = x_input_
         return clip_embed_, frustum_volume_feats, x_concat
 
-    def training_step(self, batch):
+    def training_step(self, batch): # modify this for CST training our objective
         B = batch['target_image'].shape[0]
         time_steps = torch.randint(0, self.num_timesteps, (B,), device=self.device).long()
 
-        x, clip_embed, input_info = self.prepare(batch)
+        x, clip_embed, input_info, additional_clip_embed = self.prepare(batch)
         x_noisy, noise = self.add_noise(x, time_steps) # B,N,4,H,W
 
         N = self.view_num
@@ -482,17 +491,29 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         spatial_volume = self.spatial_volume.construct_spatial_volume(x_noisy, t_embed, v_embed, self.poses, self.Ks)
 
         clip_embed, volume_feats, x_concat = self.get_target_view_feats(input_info['x'], spatial_volume, clip_embed, t_embed, v_embed, target_index)
+        additional_clip_embed, additional_volume_feats, additional_x_concat = self.get_target_view_feats(input_info['x'], spatial_volume, additional_clip_embed, t_embed, v_embed, target_index)
 
-        x_noisy_ = x_noisy[torch.arange(B)[:, None], target_index][:, 0]                                    # B,4,H,W
-        noise_predict = self.model(x_noisy_, time_steps, clip_embed, volume_feats, x_concat, is_train=True) # B,4,H,W
+        x_noisy_ = x_noisy[torch.arange(B)[:, None], target_index][:, 0]                                             # B,4,H,W
+        noise_predict_0 = self.model(x_noisy_, time_steps, clip_embed, volume_feats, x_concat, is_train=True)        # B,4,H,W
+        noise_predict_1 = self.model(
+            x_noisy_, time_steps, additional_clip_embed, additional_volume_feats, additional_x_concat, is_train=True
+        )                                                                                                            # B,4,H,W
+                                                                                                                     # noise_predict_0 B,4,H,W and noise_predict_1 B,4,H,W one of them need reorder pred noise
 
-        noise_target = noise[torch.arange(B)[:, None], target_index][:, 0]                                          # B,4,H,W
-                                                                                                                    # loss simple for diffusion
-        loss_simple = torch.nn.functional.mse_loss(noise_target, noise_predict, reduction='none')
-        loss = loss_simple.mean()
+        noise_target = noise[torch.arange(B)[:, None], target_index][:, 0] # B,4,H,W
+                                                                           # loss simple for diffusion
+        loss_simple = torch.nn.functional.mse_loss(
+            noise_target, noise_predict_0, reduction='none'
+        ) + torch.nn.functional.mse_loss(
+            noise_target, noise_predict_1, reduction='none'
+        )
+
+        loss_CST = torch.nn.functional.mse_loss(noise_predict_0, noise_predict_1, reduction='none')
+        loss = loss_simple.mean() + 2 * loss_CST.mean()
         self.log(
             'sim', loss_simple.mean(), prog_bar=True, logger=True, on_step=True, on_epoch=True, rank_zero_only=True
         )
+        self.log('CST', loss_CST.mean(), prog_bar=True, logger=True, on_step=True, on_epoch=True, rank_zero_only=True)
 
         # log others
         lr = self.optimizers().param_groups[0]['lr']
@@ -530,7 +551,7 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         inter_interval=50,
         inter_view_interval=2
     ):
-        _, clip_embed, input_info = self.prepare(batch)
+        _, clip_embed, input_info, _ = self.prepare(batch)
         x_sample, inter = sampler.sample(input_info, clip_embed, unconditional_scale=cfg_scale, log_every_t=inter_interval, batch_view_num=batch_view_num)
 
         N = x_sample.shape[1]
@@ -570,34 +591,79 @@ class SyncMultiviewDiffusion(pl.LightningModule):
         if batch_idx == 0 and self.global_rank == 0:
             self.eval()
             step = self.global_step
+            self.save_lora(f'output/syncdreamer_finetune2/lora/lora_{step}.ckpt')
             batch_ = {}
             for k, v in batch.items():
                 batch_[k] = v[:self.output_num]
             x_sample = self.sample(self.sampler, batch_, self.cfg_scale, self.batch_view_num)
-            output_dir = Path(self.image_dir) / 'images' / 'val'
-            output_dir.mkdir(exist_ok=True, parents=True)
+            output_dir = f'output/syncdreamer_finetune2/val'
+            # output_dir = Path(self.image_dir) / 'images' / 'val'
+            os.makedirs(output_dir, exist_ok=True)
             self.log_image(x_sample, batch, step, output_dir=output_dir)
 
     def configure_optimizers(self):
         lr = self.learning_rate
         print(f'setting learning rate to {lr:.4f} ...')
         paras = []
-        if self.finetune_projection:
-            paras.append({"params": self.cc_projection.parameters(), "lr": lr},)
-        if self.finetune_unet:
-            paras.append({"params": self.model.parameters(), "lr": lr},)
-        else:
-            paras.append({"params": self.model.get_trainable_parameters(), "lr": lr},)
+        require_grad_params = self.inject_lora()
+        # if self.finetune_projection:
+        #     paras.append({"params": self.cc_projection.parameters(), "lr": lr},)
+        # if self.finetune_unet:
+        #     paras.append({"params": self.model.parameters(), "lr": lr},)
+        # else:
+        #     paras.append({"params": self.model.get_trainable_parameters(), "lr": lr},)
 
-        paras.append({"params": self.time_embed.parameters(), "lr": lr * 10.0},)
-        paras.append({"params": self.spatial_volume.parameters(), "lr": lr * 10.0},)
-
+        # paras.append({"params": self.time_embed.parameters(), "lr": lr*10.0},)
+        # paras.append({"params": self.spatial_volume.parameters(), "lr": lr*10.0},)
+        paras.append({"params": require_grad_params, "lr": lr * 10.0},)
         opt = torch.optim.AdamW(paras, lr=lr)
 
         scheduler = instantiate_from_config(self.scheduler_config)
         print("Setting up LambdaLR scheduler...")
         scheduler = [{'scheduler': LambdaLR(opt, lr_lambda=scheduler.schedule), 'interval': 'step', 'frequency': 1}]
         return [opt], scheduler
+
+    def inject_lora(
+        self,
+        ckpt_fp: str = None,
+        rank: int = 12,
+        target_replace_module: list[str] = [
+            "DepthAttention"
+        ],                                                    # inside DepthTransformer: DepthAttention maybe not(and proj_out's first conv2d)
+        eval: bool = False,
+    ):
+        print(f"[INFO] Injecting LoRA from " + (str(ckpt_fp) if ckpt_fp is not None else "scratch"),)
+        require_grad_params = []
+        lora_params, _ = inject_trainable_lora_extended(
+            self.model,
+            target_replace_module=set(target_replace_module),
+            r=rank,
+            loras=ckpt_fp,
+            eval=eval,
+        )
+        if not eval:
+            require_grad_params += itertools.chain(*lora_params)
+        return require_grad_params
+
+    def save_lora(
+        self,
+        ckpt_fp: str,
+        target_replace_module: list[str] = [
+            "DepthAttention"
+        ],                                                    # inside DepthTransformer: DepthAttention maybe not(and proj_out's first conv2d)
+    ):
+        save_lora_weight(
+            self.model,
+            ckpt_fp,
+            target_replace_module=set(target_replace_module),
+        )
+        print(f"[INFO] Saved LoRA to {ckpt_fp}")
+
+    def remove_lora(self):
+        print("[INFO] Removing LoRA")
+        monkeypatch_remove_lora(self.model)
+        self.require_grad_params = []
+        return self
 
 
 class SyncDDIMSampler:

@@ -35,7 +35,6 @@ import sys
 import sqlite3
 import numpy as np
 
-
 IS_PYTHON3 = sys.version_info[0] >= 3
 
 MAX_IMAGE_ID = 2**31 - 1
@@ -102,13 +101,8 @@ CREATE_NAME_INDEX = \
     "CREATE UNIQUE INDEX IF NOT EXISTS index_name ON images(name)"
 
 CREATE_ALL = "; ".join([
-    CREATE_CAMERAS_TABLE,
-    CREATE_IMAGES_TABLE,
-    CREATE_KEYPOINTS_TABLE,
-    CREATE_DESCRIPTORS_TABLE,
-    CREATE_MATCHES_TABLE,
-    CREATE_TWO_VIEW_GEOMETRIES_TABLE,
-    CREATE_NAME_INDEX
+    CREATE_CAMERAS_TABLE, CREATE_IMAGES_TABLE, CREATE_KEYPOINTS_TABLE, CREATE_DESCRIPTORS_TABLE, CREATE_MATCHES_TABLE,
+    CREATE_TWO_VIEW_GEOMETRIES_TABLE, CREATE_NAME_INDEX
 ])
 
 
@@ -144,7 +138,6 @@ class COLMAPDatabase(sqlite3.Connection):
     def connect(database_path):
         return sqlite3.connect(database_path, factory=COLMAPDatabase)
 
-
     def __init__(self, *args, **kwargs):
         super(COLMAPDatabase, self).__init__(*args, **kwargs)
 
@@ -163,60 +156,67 @@ class COLMAPDatabase(sqlite3.Connection):
             lambda: self.executescript(CREATE_MATCHES_TABLE)
         self.create_name_index = lambda: self.executescript(CREATE_NAME_INDEX)
 
-    def add_camera(self, model, width, height, params,
-                   prior_focal_length=False, camera_id=None):
+    def add_camera(self, model, width, height, params, prior_focal_length=False, camera_id=None):
         params = np.asarray(params, np.float64)
         cursor = self.execute(
             "INSERT INTO cameras VALUES (?, ?, ?, ?, ?, ?)",
-            (camera_id, model, width, height, array_to_blob(params),
-             prior_focal_length))
+            (camera_id, model, width, height, array_to_blob(params), prior_focal_length)
+        )
         return cursor.lastrowid
 
-    def add_image(self, name, camera_id,
-                  prior_q=np.full(4, np.NaN), prior_t=np.full(3, np.NaN), image_id=None):
+    def add_image(self, name, camera_id, prior_q=np.full(4, np.nan), prior_t=np.full(3, np.nan), image_id=None):
         cursor = self.execute(
-            "INSERT INTO images VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (image_id, name, camera_id, prior_q[0], prior_q[1], prior_q[2],
-             prior_q[3], prior_t[0], prior_t[1], prior_t[2]))
+            "INSERT INTO images VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+                image_id, name, camera_id, prior_q[0], prior_q[1], prior_q[2], prior_q[3], prior_t[0], prior_t[1],
+                prior_t[2]
+            )
+        )
         return cursor.lastrowid
 
     def add_keypoints(self, image_id, keypoints):
-        assert(len(keypoints.shape) == 2)
-        assert(keypoints.shape[1] in [2, 4, 6])
+        assert (len(keypoints.shape) == 2)
+        assert (keypoints.shape[1] in [2, 4, 6])
 
         keypoints = np.asarray(keypoints, np.float32)
         self.execute(
-            "INSERT INTO keypoints VALUES (?, ?, ?, ?)",
-            (image_id,) + keypoints.shape + (array_to_blob(keypoints),))
+            "INSERT INTO keypoints VALUES (?, ?, ?, ?)", (image_id,) + keypoints.shape + (array_to_blob(keypoints),)
+        )
 
     def add_descriptors(self, image_id, descriptors):
         descriptors = np.ascontiguousarray(descriptors, np.uint8)
         self.execute(
             "INSERT INTO descriptors VALUES (?, ?, ?, ?)",
-            (image_id,) + descriptors.shape + (array_to_blob(descriptors),))
+            (image_id,) + descriptors.shape + (array_to_blob(descriptors),)
+        )
 
     def add_matches(self, image_id1, image_id2, matches):
-        assert(len(matches.shape) == 2)
-        assert(matches.shape[1] == 2)
+        assert (len(matches.shape) == 2)
+        assert (matches.shape[1] == 2)
 
         if image_id1 > image_id2:
-            matches = matches[:,::-1]
+            matches = matches[:, ::-1]
 
         pair_id = image_ids_to_pair_id(image_id1, image_id2)
         matches = np.asarray(matches, np.uint32)
-        self.execute(
-            "INSERT INTO matches VALUES (?, ?, ?, ?)",
-            (pair_id,) + matches.shape + (array_to_blob(matches),))
+        self.execute("INSERT INTO matches VALUES (?, ?, ?, ?)", (pair_id,) + matches.shape + (array_to_blob(matches),))
 
-    def add_two_view_geometry(self, image_id1, image_id2, matches,
-                              F=np.eye(3), E=np.eye(3), H=np.eye(3),
-                              qvec=np.array([1.0, 0.0, 0.0, 0.0]),
-                              tvec=np.zeros(3), config=2):
-        assert(len(matches.shape) == 2)
-        assert(matches.shape[1] == 2)
+    def add_two_view_geometry(
+        self,
+        image_id1,
+        image_id2,
+        matches,
+        F=np.eye(3),
+        E=np.eye(3),
+        H=np.eye(3),
+        qvec=np.array([1.0, 0.0, 0.0, 0.0]),
+        tvec=np.zeros(3),
+        config=2
+    ):
+        assert (len(matches.shape) == 2)
+        assert (matches.shape[1] == 2)
 
         if image_id1 > image_id2:
-            matches = matches[:,::-1]
+            matches = matches[:, ::-1]
 
         pair_id = image_ids_to_pair_id(image_id1, image_id2)
         matches = np.asarray(matches, np.uint32)
@@ -226,10 +226,11 @@ class COLMAPDatabase(sqlite3.Connection):
         qvec = np.asarray(qvec, dtype=np.float64)
         tvec = np.asarray(tvec, dtype=np.float64)
         self.execute(
-            "INSERT INTO two_view_geometries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (pair_id,) + matches.shape + (array_to_blob(matches), config,
-             array_to_blob(F), array_to_blob(E), array_to_blob(H),
-             array_to_blob(qvec), array_to_blob(tvec)))
+            "INSERT INTO two_view_geometries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (pair_id,) + matches.shape + (
+                array_to_blob(matches), config, array_to_blob(F), array_to_blob(E), array_to_blob(H),
+                array_to_blob(qvec), array_to_blob(tvec)
+            )
+        )
 
 
 def example_usage():
@@ -320,10 +321,8 @@ def example_usage():
 
     # Read and check keypoints.
 
-    keypoints = dict(
-        (image_id, blob_to_array(data, np.float32, (-1, 2)))
-        for image_id, data in db.execute(
-            "SELECT image_id, data FROM keypoints"))
+    keypoints = dict((image_id, blob_to_array(data, np.float32, (-1, 2)))
+                     for image_id, data in db.execute("SELECT image_id, data FROM keypoints"))
 
     assert np.allclose(keypoints[image_id1], keypoints1)
     assert np.allclose(keypoints[image_id2], keypoints2)
@@ -332,16 +331,12 @@ def example_usage():
 
     # Read and check matches.
 
-    pair_ids = [image_ids_to_pair_id(*pair) for pair in
-                ((image_id1, image_id2),
-                 (image_id2, image_id3),
-                 (image_id3, image_id4))]
+    pair_ids = [
+        image_ids_to_pair_id(*pair) for pair in ((image_id1, image_id2), (image_id2, image_id3), (image_id3, image_id4))
+    ]
 
-    matches = dict(
-        (pair_id_to_image_ids(pair_id),
-         blob_to_array(data, np.uint32, (-1, 2)))
-        for pair_id, data in db.execute("SELECT pair_id, data FROM matches")
-    )
+    matches = dict((pair_id_to_image_ids(pair_id), blob_to_array(data, np.uint32, (-1, 2)))
+                   for pair_id, data in db.execute("SELECT pair_id, data FROM matches"))
 
     assert np.all(matches[(image_id1, image_id2)] == matches12)
     assert np.all(matches[(image_id2, image_id3)] == matches23)

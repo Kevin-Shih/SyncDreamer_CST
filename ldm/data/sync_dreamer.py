@@ -19,6 +19,7 @@ from ldm.util import prepare_inputs
 
 
 class SyncDreamerTrainData(Dataset):
+
     def __init__(self, target_dir, input_dir, uid_set_pkl, image_size=256):
         self.default_image_size = 256
         self.image_size = image_size
@@ -29,7 +30,9 @@ class SyncDreamerTrainData(Dataset):
         print('============= length of dataset %d =============' % len(self.uids))
 
         image_transforms = []
-        image_transforms.extend([transforms.ToTensor(), transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))])
+        image_transforms.extend([
+            transforms.ToTensor(), transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))
+        ])
         self.image_transforms = torchvision.transforms.Compose(image_transforms)
         self.num_images = 16
 
@@ -39,8 +42,8 @@ class SyncDreamerTrainData(Dataset):
     def load_im(self, path):
         img = imread(path)
         img = img.astype(np.float32) / 255.0
-        mask = img[:,:,3:]
-        img[:,:,:3] = img[:,:,:3] * mask + 1 - mask # white background
+        mask = img[:, :, 3:]
+        img[:, :, :3] = img[:, :, :3] * mask + 1 - mask # white background
         img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
         return img, mask
 
@@ -70,14 +73,85 @@ class SyncDreamerTrainData(Dataset):
         input_img = self.load_index(input_dir, start_view_index)
 
         K, azimuths, elevations, distances, cam_poses = read_pickle(os.path.join(input_dir, f'meta.pkl'))
-        input_elevation = torch.from_numpy(elevations[start_view_index:start_view_index+1].astype(np.float32))
+        input_elevation = torch.from_numpy(elevations[start_view_index:start_view_index + 1].astype(np.float32))
         return {"target_image": target_images, "input_image": input_img, "input_elevation": input_elevation}
 
     def __getitem__(self, index):
         data = self.get_data_for_index(index)
         return data
 
+
+class SyncDreamerFinetuneData(Dataset):
+
+    def __init__(self, target_dir, input_dir, uid_set_pkl, image_size=256):
+        self.default_image_size = 256
+        self.image_size = image_size
+        self.target_dir = Path(target_dir)
+        self.input_dir = Path(input_dir)
+
+        self.uids = read_pickle(uid_set_pkl)
+        print('============= length of dataset %d =============' % len(self.uids))
+
+        image_transforms = []
+        image_transforms.extend([
+            transforms.ToTensor(), transforms.Lambda(lambda x: rearrange(x * 2. - 1., 'c h w -> h w c'))
+        ])
+        self.image_transforms = torchvision.transforms.Compose(image_transforms)
+        self.num_images = 16
+
+    def __len__(self):
+        return len(self.uids)
+
+    def load_im(self, path):
+        img = imread(path)
+        img = img.astype(np.float32) / 255.0
+        mask = img[:, :, 3:]
+        img[:, :, :3] = img[:, :, :3] * mask + 1 - mask # white background
+        img = Image.fromarray(np.uint8(img[:, :, :3] * 255.))
+        return img, mask
+
+    def process_im(self, im):
+        im = im.convert("RGB")
+        im = im.resize((self.image_size, self.image_size), resample=PIL.Image.BICUBIC)
+        return self.image_transforms(im)
+
+    def load_index(self, filename, index):
+        img, _ = self.load_im(os.path.join(filename, '%03d.png' % index))
+        img = self.process_im(img)
+        return img
+
+    def get_data_for_index(self, index):
+        target_dir = os.path.join(self.target_dir, self.uids[index])
+        input_dir = os.path.join(self.input_dir, self.uids[index])
+
+        views = np.arange(0, self.num_images)
+        start_view_index_0, start_view_index_1 = np.random.randint(0, self.num_images, 2)
+        views = (views + start_view_index_0) % self.num_images
+
+        target_images = []
+        for si, target_index in enumerate(views):
+            img = self.load_index(target_dir, target_index)
+            target_images.append(img)
+        target_images = torch.stack(target_images, 0)
+        input_img = self.load_index(input_dir, start_view_index_0)
+        addtional_input_image = self.load_index(input_dir, start_view_index_1)
+
+        K, azimuths, elevations, distances, cam_poses = read_pickle(os.path.join(input_dir, f'meta.pkl'))
+        input_elevation = torch.from_numpy(elevations[start_view_index_0:start_view_index_0 + 1].astype(np.float32))
+        return {
+            "target_image": target_images,
+            "input_image": input_img,
+            "addtional_input_image": addtional_input_image,
+            "input_elevation": input_elevation
+        }
+
+    def __getitem__(self, index):
+        data = self.get_data_for_index(index)
+        return data
+
+
 class SyncDreamerEvalData(Dataset):
+
     def __init__(self, image_dir):
         self.image_size = 256
         self.image_dir = Path(image_dir)
@@ -85,7 +159,7 @@ class SyncDreamerEvalData(Dataset):
 
         self.fns = []
         for fn in Path(image_dir).iterdir():
-            if fn.suffix=='.png':
+            if fn.suffix == '.png':
                 self.fns.append(fn)
         print('============= length of dataset %d =============' % len(self.fns))
 
@@ -100,8 +174,21 @@ class SyncDreamerEvalData(Dataset):
     def __getitem__(self, index):
         return self.get_data_for_index(index)
 
-class SyncDreamerDataset(pl.LightningDataModule):
-    def __init__(self, target_dir, input_dir, validation_dir, batch_size, uid_set_pkl, image_size=256, num_workers=4, seed=0, **kwargs):
+
+class SyncDreamerDataset(pl.LightningDataModule): # modify this for our CST objective training dataset
+
+    def __init__(
+        self,
+        target_dir,
+        input_dir,
+        validation_dir,
+        batch_size,
+        uid_set_pkl,
+        image_size=256,
+        num_workers=4,
+        seed=0,
+        **kwargs
+    ):
         super().__init__()
         self.target_dir = target_dir
         self.input_dir = input_dir
@@ -115,17 +202,27 @@ class SyncDreamerDataset(pl.LightningDataModule):
 
     def setup(self, stage):
         if stage in ['fit']:
-            self.train_dataset = SyncDreamerTrainData(self.target_dir, self.input_dir, uid_set_pkl=self.uid_set_pkl, image_size=256)
+            self.train_dataset = SyncDreamerTrainData(
+                self.target_dir, self.input_dir, uid_set_pkl=self.uid_set_pkl, image_size=256
+            )
             self.val_dataset = SyncDreamerEvalData(image_dir=self.validation_dir)
         else:
             raise NotImplementedError
 
     def train_dataloader(self):
         sampler = DistributedSampler(self.train_dataset, seed=self.seed)
-        return wds.WebLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, sampler=sampler)
+        return wds.WebLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            sampler=sampler
+        )
 
     def val_dataloader(self):
-        loader = wds.WebLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False)
+        loader = wds.WebLoader(
+            self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False
+        )
         return loader
 
     def test_dataloader(self):

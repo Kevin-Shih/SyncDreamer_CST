@@ -249,6 +249,8 @@ if __name__ == "__main__":
     if opt.finetune_from != "":
         load_pretrain_stable_diffusion(model, opt.finetune_from)
 
+    # model.inject_lora()
+
     ###################logger#####################
     # default logger configs
     default_logger_cfg = {"target": "pytorch_lightning.loggers.TensorBoardLogger",

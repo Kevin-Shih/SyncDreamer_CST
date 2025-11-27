@@ -3,3 +3,14 @@ training_examples
 objaverse_examples
 ldm/__pycache__/
 
+eval_*/
+.vscode
+ckpt
+**/__pycache__
+output/
+data
+
+raymarching/build
+raymarching/*.egg*
+raymarching/*.so
+*.log
